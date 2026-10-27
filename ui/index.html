@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="http://astra-plugin.localhost/bridge/astra-bridge.js"></script>
+<title>Перевод с экрана</title>
+<style>
+/* Цвета — из темы Astra (мост ставит переменные и data-theme на <html>); после запятых — только
+   для страницы, открытой вне Astra. Страница рисуется поверх Astra (transparent): своего фона нет. */
+:root{font-family:Inter,"Segoe UI",sans-serif;
+  --text:var(--color-text,#e9ecf3);--muted:var(--color-text-muted,#8a93a8);
+  --card:var(--color-surface,#171b24);--raised:var(--color-surface-raised,#1d2230);--hover:var(--color-surface-hover,#20263a);
+  --line:var(--color-border-subtle,#ffffff14);--accent:var(--color-accent,#e8b04a);
+  --on-accent:var(--color-text-on-accent,#111);--ok:var(--color-success,#2f9e6f);--ok-bg:var(--color-success-bg,#2f9e6f1a);
+  --bad:var(--color-danger,#e06a7e);--bad-bg:var(--color-danger-bg,#e06a7e14);
+  --warn-bg:var(--color-warning-bg,#d8b45a14);--warn-border:var(--color-warning-border,#d8b45a40);
+  --field:var(--color-paper,#0b0e15);--toggle-off:var(--color-toggle-off,#ffffff1a);--knob:var(--color-knob,#cfd3de)}
+body{color-scheme:light dark}
+:root[data-theme="light"] body{color-scheme:light}
+:root[data-theme="dark"] body{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:transparent;color:var(--text);font-size:14px}
+.wrap{max-width:820px;margin:0 auto;padding:26px 24px 60px}
+html,body{overflow-x:hidden}
+h1{font-size:26px;margin:0;font-weight:800;letter-spacing:-.3px}
+h1 span{color:var(--accent)}
+.sub{color:var(--muted);margin:4px 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin-bottom:14px}
+.card h2{font-size:15px;margin:0 0 10px;font-weight:700}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grid{display:flex;flex-direction:column}
+.btn{border:1px solid var(--line);border-radius:10px;padding:8px 14px;background:var(--raised);color:var(--text);cursor:pointer;font-weight:600;font-size:13px}
+.btn:hover{background:var(--hover)}
+.btn.primary{background:var(--accent);border-color:transparent;color:var(--on-accent)}
+.btn.on{border-color:var(--accent);color:var(--accent)}
+.muted{color:var(--muted);font-size:12px}
+.notice{background:var(--warn-bg);border:1px solid var(--warn-border);border-radius:12px;padding:10px 12px;margin-bottom:10px;font-size:13px}
+.okbox{background:var(--ok-bg);border-radius:12px;padding:10px 12px;margin-bottom:10px;font-size:13px}
+.err{background:var(--bad-bg);border-radius:12px;padding:10px 12px;margin-bottom:10px;font-size:13px;white-space:pre-wrap}
+select,input[type=text],input[type=password],input[type=number]{max-width:100%;min-width:0;background:var(--field);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:8px 10px;font:inherit}
+input[type=number]{width:84px}
+label.sw{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;border-top:1px solid var(--line);cursor:pointer}
+.grid label.sw:first-child{border-top:0;padding-top:2px}
+label.sw>span:first-child{flex:1;min-width:0}
+label.sw select,label.sw input[type=password]{width:min(320px,52vw);max-width:100%}
+label.sw input[type=checkbox]{display:none}
+.tg{width:38px;height:22px;border-radius:11px;background:var(--toggle-off);position:relative;flex:none;transition:.15s}
+.tg::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--knob);transition:.15s}
+input:checked+.tg{background:var(--accent)}
+input:checked+.tg::after{left:19px;background:#fff}
+.keys{display:flex;flex-direction:column;gap:10px}
+.key{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.key b{display:block}
+.hk{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.hk.bad select{border-color:var(--bad);color:var(--bad)}
+.mod{border:1px solid var(--line);background:var(--field);color:var(--muted);border-radius:8px;padding:6px 10px;font:600 12px Consolas,monospace;cursor:pointer;user-select:none}
+.mod.on{background:var(--accent);border-color:transparent;color:var(--on-accent)}
+.mod:disabled{opacity:.4;cursor:default}
+.hk select{font-family:Consolas,monospace;font-weight:700;min-width:96px}
+code{background:var(--field);padding:2px 6px;border-radius:6px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Перевод <span>с экрана</span></h1>
+  <div class="sub">Выдели текст на экране — перевод появится рядом. Текст распознаёт сама Windows прямо на компьютере; в переводчик уходит только распознанный текст, не картинка.</div>
+
+  <div id="warns"></div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Горячие клавиши</h2>
+      <div class="row"><button class="btn primary" id="tryRegion">Перевести область</button><button class="btn" id="toggleLive">Субтитры</button></div>
+    </div>
+    <div class="muted" style="margin:6px 0 12px">Отметь Ctrl / Alt / Shift / Win и выбери клавишу. «Выкл» — отключить сочетание.</div>
+    <div class="keys">
+      <div class="key"><div><b>Перевести область</b><span class="muted">выделяешь мышкой — перевод рядом</span></div><div class="hk" data-hk="hotkeyRegion"></div></div>
+      <div class="key"><div><b>Субтитры вкл/выкл</b><span class="muted">область переводится каждую секунду</span></div><div class="hk" data-hk="hotkeyLive"></div></div>
+      <div class="key"><div><b>Перевести активное окно</b><span class="muted">всё окно целиком</span></div><div class="hk" data-hk="hotkeyWindow"></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Языки и переводчик</h2>
+    <div class="grid">
+      <label class="sw"><span>Язык текста на экране</span><select data-k="ocrLang" id="ocrLang"></select></label>
+      <label class="sw"><span>Переводить на</span><select data-k="to" id="to"></select></label>
+      <label class="sw"><span>Переводчик</span><select data-k="engine"><option value="google">Google — бесплатно, без ключа</option><option value="deepl">DeepL — нужен ключ</option></select></label>
+      <label class="sw" id="deeplRow"><span>Ключ DeepL</span><input type="password" data-k="deeplKey" placeholder="xxxx:fx" style="width:180px"></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Как показывать</h2>
+    <div class="grid">
+      <label class="sw"><span>Размер шрифта</span><input type="number" min="9" max="40" data-k="fontSize"></label>
+      <label class="sw"><span>Скрывать перевод через, сек (0 — по клику)</span><input type="number" min="0" max="600" data-k="popupSec"></label>
+      <label class="sw"><span>Субтитры: проверять раз в, мс</span><input type="number" min="250" max="10000" step="50" data-k="liveMs"></label>
+      <label class="sw"><span>Субтитры показывать<br><span class="muted">окно субтитров можно перетащить мышкой — место запомнится</span></span><select data-k="livePlace"><option value="over">поверх выбранной области</option><option value="under">под областью</option><option value="above">над областью</option><option value="bottom">внизу экрана</option><option value="custom">где я перетащил</option></select></label>
+      <label class="sw"><span>Субтитры: сколько последних фраз видно</span><input type="number" min="1" max="6" data-k="liveKeep"></label>
+      <label class="sw"><span>Показывать и оригинал</span><input type="checkbox" data-k="showOriginal"><span class="tg"></span></label>
+      <label class="sw"><span>Копировать перевод в буфер</span><input type="checkbox" data-k="copy"><span class="tg"></span></label>
+      <label class="sw"><span>Astra читает перевод вслух</span><input type="checkbox" data-k="speak"><span class="tg"></span></label>
+    </div>
+    <div id="speakNote"></div>
+  </div>
+
+  <div class="card">
+    <h2>Нет нужного языка текста?</h2>
+    <div class="muted" style="font-size:13px;line-height:1.6">
+      Windows распознаёт языки, которые у неё установлены. Японский, китайский, корейский и другие ставятся бесплатно:
+      <b>Параметры → Время и язык → Язык и регион → Добавить язык</b>.
+      Или в PowerShell от имени администратора: <code>Add-WindowsCapability -Online -Name "Language.OCR~~~ja-JP~0.0.1.0"</code>.
+      После установки перезапусти плагин.<br>
+      Не видно перевода в игре? Включи в игре режим «окно без рамки» (borderless): поверх эксклюзивного полноэкранного режима Windows ничего не показывает.
+    </div>
+  </div>
+</div>
+<script src="./app.js"></script>
+</body>
+</html>

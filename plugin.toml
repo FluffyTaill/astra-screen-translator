@@ -1,0 +1,35 @@
+[plugin]
+id = "screen-translator"
+name = "Screen Translator"
+version = "0.1.4"
+description = "Translate any text on screen: select a region with a hotkey, or turn on live subtitles for game dialogs and videos. Text is recognized locally by Windows OCR"
+author = "Taill"
+license = "MIT"
+icon = "icon.svg"
+call_timeout_secs = 300
+
+[entry]
+command = "node"
+args = ["dist/index.js"]
+runtimes = ["node"]
+
+[capabilities]
+tools = true
+triggers = true
+ui_contributions = true
+
+[platform]
+os = ["windows"]
+arch = []
+
+[config]
+schema = """
+{"type":"object","properties":{}}
+"""
+
+[bundle]
+schema = "astra.bundle/2"
+target = "noarch"
+
+[permissions]
+fire_trigger = { reason = "Lets Astra read a translation aloud through the Astra command the plugin page creates, when you turn that on." }
