@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 process.env.ST_NO_HELPER = "1";
 const require = createRequire(import.meta.url);
-const { app, cleanSettings, cleanGlossary, parseHotkey, DEFAULTS, Helper, similar, translate, worthTranslating, liveUpdate, speechChunks, protect, restore, wordCard, RateLimited, installCommand, OCR_PACKS } = require("./.build/plugin.cjs");
+const { app, cleanSettings, cleanGlossary, parseHotkey, DEFAULTS, Helper, similar, translate, worthTranslating, liveUpdate, speechChunks, protect, restore, wordCard, RateLimited, installCommand, OCR_PACKS, dictionary } = require("./.build/plugin.cjs");
 const { Harness } = require("astra-plugin-sdk/testing");
 
 const calls = [];
@@ -191,20 +191,43 @@ test("карточка слова: перевод, транскрипция, з�
   assert.equal(wordCard(d, { from: "bridge", to: "Переправа" }).text.split("\n")[0], "Переправа");
 });
 
-test("Google ограничил запросы — понятная ошибка, а не «ответил 429»", async () => {
-  const real = globalThis.fetch;
-  globalThis.fetch = async () => new Response("", { status: 429 });
-  try {
-    await assert.rejects(translate("Never seen before 429", "ru", "google"), (e) => e instanceof RateLimited && /ограничил/.test(e.message));
-  } finally {
-    globalThis.fetch = real;
-  }
-});
-
 test("установка языка распознавания: только языки из списка, команда с правами администратора", () => {
   assert.match(installCommand("ja-JP"), /-Verb RunAs/);
   assert.match(installCommand("ja-JP"), /Language\.OCR~~~ja-JP~0\.0\.1\.0/);
   assert.throws(() => installCommand("ja-JP'; Remove-Item C:\\ -Recurse; '"), /нет такого языка/);
   assert.ok(OCR_PACKS.some((p) => p.tag === "ko-KR"));
   assert.equal(parseHotkey(DEFAULTS.hotkeyWord) !== null, true);
+});
+
+// последним: после ограничения Google минуту не трогается, и это задело бы тесты выше
+test("Google ограничил запросы — перевод уходит в MyMemory, а Google минуту отдыхает", async () => {
+  const real = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    seen.push(u.includes("googleapis") ? "google" : u.includes("mymemory") ? "mymemory" : "other");
+    if (u.includes("googleapis")) return new Response("", { status: 429 });
+    const q = new URL(u).searchParams.get("q");
+    return Response.json({ responseStatus: 200, responseData: { translatedText: "MM: " + q, detectedLanguage: "en-GB" } });
+  };
+  try {
+    const a = await translate("Fallback one", "ru", "google");
+    assert.deepEqual(a, { text: "MM: Fallback one", from: "en", engine: "mymemory" });
+    await translate("Fallback two", "ru", "google");
+    assert.deepEqual(seen, ["google", "mymemory", "mymemory"], "после 429 Google не спрашиваем");
+    const d = await dictionary("bridge", "ru");
+    assert.equal(d.text, "MM: bridge");
+    assert.deepEqual(d.senses, []);
+    // длинный текст — частями не длиннее ~450 символов
+    seen.length = 0;
+    const long = Array(30).fill("This sentence is long enough to need splitting.").join(" ");
+    const l = await translate(long, "ru", "google");
+    assert.ok(seen.filter((x) => x === "mymemory").length >= 3);
+    assert.ok(l.text.startsWith("MM: "));
+    // дневной лимит MyMemory кончился — понятная ошибка
+    globalThis.fetch = async (url) => String(url).includes("googleapis") ? new Response("", { status: 429 }) : Response.json({ responseStatus: 429, quotaFinished: true, responseData: { translatedText: "" } });
+    await assert.rejects(translate("Quota gone", "ru", "google"), /лимит запасного переводчика MyMemory/);
+  } finally {
+    globalThis.fetch = real;
+  }
 });

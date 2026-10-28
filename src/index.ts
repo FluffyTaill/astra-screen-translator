@@ -219,7 +219,15 @@ export async function lookupWord(): Promise<string> {
     return "Под курсором нет слова.";
   }
   const g = settings.glossary.find((x) => x.from.trim().toLowerCase() === r.word.toLowerCase());
-  const d = await dictionary(r.word, settings.to);
+  let d: DictEntry;
+  try {
+    d = await dictionary(r.word, settings.to);
+  } catch (e) {
+    // ошибка видна рядом со словом, а не только в журнале
+    await helper.show(r.rect, `${r.word}
+${(e as Error).message}`, { style: "card", where: "below", size: settings.fontSize, ms: 6000 });
+    throw e;
+  }
   const card = wordCard(d, g);
   await helper.show(r.rect, card.text, { style: "card", where: "below", size: settings.fontSize, ms: popupMs(), original: card.original, badge: badgeOf(d.from) });
   return `${r.word}: ${card.text}`;

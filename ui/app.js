@@ -7,7 +7,10 @@ const TARGETS = [["ru", "Русский"], ["en", "English"], ["uk", "Украї
 let state = null;
 let note = "";
 
+let noteTimer = null;
 function renderWarns() {
+  // подсказки и сообщения о действиях живут несколько секунд, а не висят всегда
+  if (note && !noteTimer) noteTimer = setTimeout(() => { note = ""; noteTimer = null; renderWarns(); }, 7000);
   const w = note ? [note] : [];
   if (state.failedHotkeys && state.failedHotkeys.length)
     w.push(`<div class="err">Эти сочетания заняты другой программой — выбери другие: ${state.failedHotkeys.map((id) => esc(state.settings[{ region: "hotkeyRegion", live: "hotkeyLive", window: "hotkeyWindow", word: "hotkeyWord" }[id]])).join(", ")}</div>`);

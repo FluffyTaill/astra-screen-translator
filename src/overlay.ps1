@@ -738,7 +738,7 @@ function Handle($msg) {
         $byKey = Read-All ([ST.Shot]::Variants($bmp, (New-Object System.Drawing.Rectangle(0, 0, $area.Width, $area.Height)), $scale, $script:enhance)) ([string]$c.lang)
         $hit = Find-Word $byKey (($p.X - $area.X) * $scale) (($p.Y - $area.Y) * $scale)
       } finally { $bmp.Dispose() }
-      if (-not $hit) { Send @{ ev = 'word'; req = $c.req; found = $false; rect = @($p.X - 20, $p.Y - 10, 40, 20) }; return }
+      if (-not $hit) { Send @{ ev = 'word'; req = $c.req; found = $false; rect = @(($p.X - 20), ($p.Y - 10), 40, 20) }; return }
       $r = @([int]($area.X + $hit.x / $scale), [int]($area.Y + $hit.y / $scale), [int][Math]::Max(1, $hit.w / $scale), [int][Math]::Max(1, $hit.h / $scale))
       Send @{ ev = 'word'; req = $c.req; found = $true; word = $hit.word; line = $hit.line; lang = $hit.lang; rect = $r }
     }
@@ -765,7 +765,9 @@ $timer.Add_Tick({
     catch {
       $req = $null
       try { $req = ($line | ConvertFrom-Json).req } catch { }
-      Send @{ ev = 'error'; req = $req; msg = $_.Exception.Message }
+      # the line of this script that failed, so a report from the field points at the bug
+      $at = $_.InvocationInfo
+      Send @{ ev = 'error'; req = $req; msg = "$($_.Exception.Message) (строка $($at.ScriptLineNumber): $($at.Line.Trim()))" }
     }
   }
   } finally { $script:busy = $false }

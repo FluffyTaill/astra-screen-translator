@@ -2,7 +2,7 @@
 // Results are cached: live subtitles ask for the same lines again and again.
 
 export type Engine = "google" | "deepl";
-export interface Translation { text: string; from: string; engine: Engine }
+export interface Translation { text: string; from: string; engine: Engine | "mymemory" }
 
 const cache = new Map<string, Translation>();
 const CACHE_MAX = 500;
@@ -13,10 +13,15 @@ function remember(key: string, t: Translation) {
   return t;
 }
 
-// Бесплатный Google иногда временно ограничивает частые запросы (HTTP 429)
+// Бесплатный Google иногда временно ограничивает частые запросы (HTTP 429). Тогда минуту перевод
+// идёт через MyMemory (бесплатный официальный API, без ключа, но медленнее и попроще), а Google не
+// трогаем, чтобы ограничение снялось
 export class RateLimited extends Error {
   constructor() { super("Google временно ограничил запросы — подожди минуту или переключись на DeepL"); }
 }
+const GOOGLE_REST_MS = 60_000;
+let googleRestUntil = 0;
+export const googleResting = () => Date.now() < googleRestUntil;
 
 // ── свой словарь ──
 // «Stamina → Выносливость», «Geralt → (пусто: не переводить)». Термин в тексте заменяется меткой
@@ -57,8 +62,16 @@ export async function translate(text: string, to: string, engine: Engine, deeplK
   if (engine === "deepl") {
     if (!deeplKey.trim()) throw new Error("Для DeepL нужен ключ — его можно получить бесплатно на deepl.com/pro-api");
     t = await deepl(g.text, to, deeplKey.trim());
+  } else if (googleResting()) {
+    t = await mymemory(g.text, to);
   } else {
-    t = await google(g.text, to);
+    try {
+      t = await google(g.text, to);
+    } catch (e) {
+      if (!(e instanceof RateLimited)) throw e;
+      googleRestUntil = Date.now() + GOOGLE_REST_MS;
+      t = await mymemory(g.text, to);
+    }
   }
   return remember(key, { ...t, text: restore(t.text, g.slots) });
 }
@@ -72,6 +85,22 @@ const POS: Record<string, string> = {
 };
 
 export async function dictionary(word: string, to: string): Promise<DictEntry> {
+  // Google ограничил запросы — хотя бы перевод слова, без значений и транскрипции
+  const plain = async () => {
+    const t = await mymemory(word, to);
+    return { word, from: t.from, text: t.text, transcription: "", senses: [] };
+  };
+  if (googleResting()) return plain();
+  try {
+    return await googleDictionary(word, to);
+  } catch (e) {
+    if (!(e instanceof RateLimited)) throw e;
+    googleRestUntil = Date.now() + GOOGLE_REST_MS;
+    return plain();
+  }
+}
+
+async function googleDictionary(word: string, to: string): Promise<DictEntry> {
   const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(to)}&dt=t&dt=bd&dt=rm&q=${encodeURIComponent(word)}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
   if (res.status === 429) throw new RateLimited();
@@ -82,6 +111,32 @@ export async function dictionary(word: string, to: string): Promise<DictEntry> {
   const rm = parts.find((p) => p[0] === null && p.length > 3);
   const senses = ((d[1] || []) as [string, string[]][]).map(([pos, words]) => ({ pos: POS[pos] || pos, words: (words || []).slice(0, 6) }));
   return { word, from: String(d[2] || ""), text, transcription: rm && typeof rm[3] === "string" ? rm[3] : "", senses };
+}
+
+// MyMemory: не больше ~500 символов за запрос, поэтому длинный текст — частями по предложениям.
+// Без регистрации 5000 символов в день на этот компьютер
+async function mymemory(text: string, to: string): Promise<Translation> {
+  const parts: string[] = [];
+  let cur = "";
+  for (const s of text.split(/(?<=[.!?…])\s+|\r?\n/)) {
+    if (cur && cur.length + s.length + 1 > 450) { parts.push(cur); cur = ""; }
+    cur = cur ? `${cur} ${s}` : s;
+    while (cur.length > 450) { parts.push(cur.slice(0, 450)); cur = cur.slice(450); }
+  }
+  if (cur) parts.push(cur);
+  const out: string[] = [];
+  let from = "";
+  for (const q of parts) {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=${encodeURIComponent(`Autodetect|${to.split("-")[0]}`)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) throw new Error(`MyMemory ответил ${res.status}`);
+    const d = (await res.json()) as { responseStatus: number | string; responseDetails?: string; quotaFinished?: boolean; responseData: { translatedText: string; detectedLanguage?: string } };
+    if (d.quotaFinished || Number(d.responseStatus) === 429) throw new Error("Google ограничил запросы, а дневной лимит запасного переводчика MyMemory закончился — включи DeepL или подожди");
+    if (Number(d.responseStatus) !== 200) throw new Error(`MyMemory: ${d.responseDetails || d.responseStatus}`);
+    out.push(d.responseData.translatedText);
+    from = from || String(d.responseData.detectedLanguage || "");
+  }
+  return { text: out.join(" "), from: from.split("-")[0], engine: "mymemory" };
 }
 
 // Google splits on its own; long requests go as a POST body, so a full screen of text fits
