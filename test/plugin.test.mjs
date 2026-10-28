@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 process.env.ST_NO_HELPER = "1";
 const require = createRequire(import.meta.url);
-const { app, cleanSettings, parseHotkey, DEFAULTS, Helper, similar, translate, worthTranslating, liveUpdate, speechChunks } = require("./.build/plugin.cjs");
+const { app, cleanSettings, cleanGlossary, parseHotkey, DEFAULTS, Helper, similar, translate, worthTranslating, liveUpdate, speechChunks, protect, restore, wordCard, RateLimited, installCommand, OCR_PACKS } = require("./.build/plugin.cjs");
 const { Harness } = require("astra-plugin-sdk/testing");
 
 const calls = [];
@@ -154,7 +154,57 @@ test("помощник Windows: запускается, знает языки, �
       assert.match(mix.text, /Чтобы выйти из полноэкранного режима/);
       assert.doesNotMatch(mix.text, /2504|HT06|T06b/);
     }
+    // бледный мелкий текст: без улучшения картинки Windows его не видит, с улучшением — читает
+    const raw = await h.request({ op: "selftest", text: "The bridge is out. Find another way across!", lang: "auto", style: "faint", enhance: false });
+    const enh = await h.request({ op: "selftest", text: "The bridge is out. Find another way across!", lang: "auto", style: "faint", enhance: true });
+    assert.match(String(enh.text), /bridge is out/i);
+    assert.ok(String(raw.text).length < String(enh.text).length, `без улучшения: «${raw.text}»`);
+    // игровой текст в обводке на пёстром фоне читается и с улучшением не хуже
+    const game = await h.request({ op: "selftest", text: "Press F to pay respects", lang: "auto", style: "game", enhance: true });
+    assert.equal(game.text, "Press F to pay respects");
+    // слово под курсором: точка над словом → это слово, точка мимо текста → ничего
+    const w1 = await h.request({ op: "selftest", text: "The bridge is out. Find another way!", lang: "auto", px: 120, py: 45 });
+    assert.equal(w1.word, "bridge");
+    const w2 = await h.request({ op: "selftest", text: "The bridge is out. Find another way!", lang: "auto", px: 2000, py: 45 });
+    assert.equal(w2.word, null);
   } finally {
     h.stop();
   }
+});
+
+test("свой словарь: термины подменяются метками и возвращаются нужным словом", async () => {
+  const g = [{ from: "Geralt", to: "" }, { from: "Stamina", to: "Выносливость" }, { from: "Iron Sword", to: "Железный меч" }, { from: "Sword", to: "Клинок" }];
+  const p = protect("geralt drank the Stamina potion, then drew the Iron Sword and a sword. Swordfish!", g);
+  assert.equal(p.text, "ZXQ2 drank the ZXQ1 potion, then drew the ZXQ0 and a ZXQ3. Swordfish!", "целые слова, длинные термины первыми");
+  assert.deepEqual(p.slots, ["Железный меч", "Выносливость", "geralt", "Клинок"], "пустой перевод — слово как в оригинале");
+  assert.equal(restore("ZXQ2 выпил зелье ZXQ1, достал ZXQ 0 и zxq3.", p.slots), "geralt выпил зелье Выносливость, достал Железный меч и Клинок.");
+  // перевод через Google (подменённый) с меткой и обратно
+  const t = await translate("Use Stamina wisely", "ru", "google", "", [{ from: "Stamina", to: "Выносливость" }]);
+  assert.equal(t.text, "Перевод: Use Выносливость wisely");
+  assert.deepEqual(cleanGlossary([{ from: " HP ", to: " ОЗ " }, { from: "", to: "x" }, null, { from: 5 }]), [{ from: "HP", to: "ОЗ" }]);
+  assert.deepEqual(cleanSettings({ glossary: [{ from: "HP", to: "ОЗ" }] }).glossary, [{ from: "HP", to: "ОЗ" }]);
+});
+
+test("карточка слова: перевод, транскрипция, значения по частям речи; словарь пользователя важнее", () => {
+  const d = { word: "bridge", from: "en", text: "мост", transcription: "brij", senses: [{ pos: "сущ.", words: ["мост", "мостик"] }, { pos: "глаг.", words: ["соединять"] }] };
+  assert.deepEqual(wordCard(d), { text: "мост\nсущ. мост, мостик\nглаг. соединять", original: "bridge   [brij]" });
+  assert.equal(wordCard(d, { from: "bridge", to: "Переправа" }).text.split("\n")[0], "Переправа");
+});
+
+test("Google ограничил запросы — понятная ошибка, а не «ответил 429»", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => new Response("", { status: 429 });
+  try {
+    await assert.rejects(translate("Never seen before 429", "ru", "google"), (e) => e instanceof RateLimited && /ограничил/.test(e.message));
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+test("установка языка распознавания: только языки из списка, команда с правами администратора", () => {
+  assert.match(installCommand("ja-JP"), /-Verb RunAs/);
+  assert.match(installCommand("ja-JP"), /Language\.OCR~~~ja-JP~0\.0\.1\.0/);
+  assert.throws(() => installCommand("ja-JP'; Remove-Item C:\\ -Recurse; '"), /нет такого языка/);
+  assert.ok(OCR_PACKS.some((p) => p.tag === "ko-KR"));
+  assert.equal(parseHotkey(DEFAULTS.hotkeyWord) !== null, true);
 });

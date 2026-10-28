@@ -17,9 +17,11 @@ export class Helper {
   private pending = new Map<number, Pending>();
   private seq = 0;
   private stopped = false;
+  private restarting = false;
   private restarts = 0;
   private ready: Promise<void> | null = null;
   private hotkeys: HotkeySpec[] = [];
+  private config: Record<string, unknown> = {};
   onHotkey: (id: string) => void = () => {};
   onSpeak: (text: string) => void = () => {};
   onMoved: (cx: number, y: number) => void = () => {};
@@ -50,6 +52,7 @@ export class Helper {
           clearTimeout(fail);
           this.restarts = 0;
           if (this.hotkeys.length) void this.setHotkeys(this.hotkeys).catch(() => {});
+          if (Object.keys(this.config).length) void this.setConfig(this.config).catch(() => {});
           resolve();
           return;
         }
@@ -77,7 +80,7 @@ export class Helper {
         for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(new Error("помощник закрылся")); }
         this.pending.clear();
         if (!started) reject(new Error(`помощник не запустился (код ${code}): ${err.trim().slice(-400)}`));
-        if (this.stopped) return;
+        if (this.stopped || this.restarting) return;
         this.onLog(`помощник закрылся (код ${code}) ${err.trim().slice(-300)}`);
         const wait = Math.min(60000, 2000 * 2 ** this.restarts++);
         setTimeout(() => { if (!this.stopped) void this.start().catch((e) => this.onLog(e.message)); }, wait).unref();
@@ -104,6 +107,12 @@ export class Helper {
   async fire(cmd: Record<string, unknown>) {
     await this.start();
     this.send(cmd);
+  }
+
+  // настройки помощника (enhance) — переживают его перезапуск
+  async setConfig(config: Record<string, unknown>) {
+    this.config = { ...this.config, ...config };
+    if (this.proc) this.send({ op: "config", ...this.config });
   }
 
   async setHotkeys(list: HotkeySpec[]) {
@@ -134,6 +143,23 @@ export class Helper {
   async selfTest(text: string, lang: string) {
     const r = await this.request({ op: "selftest", text, lang });
     return { text: String(r.text || ""), lang: String(r.lang || ""), ms: Number(r.ms) };
+  }
+
+  // слово под курсором мыши: Windows читает полосу экрана вокруг него
+  async word(lang: string) {
+    const r = await this.request({ op: "word", lang }, 30000);
+    return { found: !!r.found, word: String(r.word || ""), line: String(r.line || ""), lang: String(r.lang || ""), rect: r.rect as Rect };
+  }
+
+  // новые языки распознавания Windows видны только новому процессу помощника
+  async restart() {
+    const p = this.proc;
+    if (!p) return this.start();
+    this.restarting = true;
+    await new Promise<void>((resolve) => { p.once("exit", () => resolve()); p.kill(); });
+    this.restarting = false;
+    this.restarts = 0;
+    return this.start();
   }
 
   async languages(): Promise<{ tag: string; name: string }[]> {

@@ -13,17 +13,75 @@ function remember(key: string, t: Translation) {
   return t;
 }
 
-export async function translate(text: string, to: string, engine: Engine, deeplKey = ""): Promise<Translation> {
+// Бесплатный Google иногда временно ограничивает частые запросы (HTTP 429)
+export class RateLimited extends Error {
+  constructor() { super("Google временно ограничил запросы — подожди минуту или переключись на DeepL"); }
+}
+
+// ── свой словарь ──
+// «Stamina → Выносливость», «Geralt → (пусто: не переводить)». Термин в тексте заменяется меткой
+// ZXQ<n>, которую переводчики оставляют как есть, а в переводе метка становится нужным словом.
+export interface GlossaryRule { from: string; to: string }
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export function protect(text: string, rules: GlossaryRule[]) {
+  const slots: string[] = [];
+  let out = text;
+  // длинные термины первыми: «Iron Sword» раньше «Sword»
+  for (const r of [...rules].filter((x) => x.from.trim()).sort((a, b) => b.from.trim().length - a.from.trim().length)) {
+    const term = r.from.trim();
+    // целое слово, без учёта регистра; \p{L} — чтобы «Ice» не задел «Iceberg» и на кириллице тоже
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(term)}(?![\\p{L}\\p{N}])`, "giu");
+    out = out.replace(re, (m) => {
+      slots.push(r.to.trim() || m);
+      return `ZXQ${slots.length - 1}`;
+    });
+  }
+  return { text: out, slots };
+}
+
+export function restore(text: string, slots: string[]) {
+  if (!slots.length) return text;
+  return text.replace(/ZXQ\s?(\d+)/gi, (m, n) => slots[Number(n)] ?? m);
+}
+
+export async function translate(text: string, to: string, engine: Engine, deeplKey = "", glossary: GlossaryRule[] = []): Promise<Translation> {
   const src = text.trim();
   if (!src) return { text: "", from: "", engine };
-  const key = `${engine}|${to}|${src}`;
+  const g = protect(src, glossary);
+  const key = `${engine}|${to}|${g.text}|${g.slots.join("\u0001")}`;
   const hit = cache.get(key);
   if (hit) return hit;
+  let t: Translation;
   if (engine === "deepl") {
     if (!deeplKey.trim()) throw new Error("Для DeepL нужен ключ — его можно получить бесплатно на deepl.com/pro-api");
-    return remember(key, await deepl(src, to, deeplKey.trim()));
+    t = await deepl(g.text, to, deeplKey.trim());
+  } else {
+    t = await google(g.text, to);
   }
-  return remember(key, await google(src, to));
+  return remember(key, { ...t, text: restore(t.text, g.slots) });
+}
+
+// ── словарная карточка для одного слова (Google: перевод, транскрипция, значения по частям речи) ──
+export interface DictEntry { word: string; from: string; text: string; transcription: string; senses: { pos: string; words: string[] }[] }
+const POS: Record<string, string> = {
+  noun: "сущ.", verb: "глаг.", adjective: "прил.", adverb: "нареч.", pronoun: "мест.", preposition: "предл.",
+  conjunction: "союз", interjection: "межд.", abbreviation: "сокр.", phrase: "фраза", prefix: "прист.", suffix: "суфф.",
+  article: "артикль", particle: "част.", numeral: "числ."
+};
+
+export async function dictionary(word: string, to: string): Promise<DictEntry> {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(to)}&dt=t&dt=bd&dt=rm&q=${encodeURIComponent(word)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (res.status === 429) throw new RateLimited();
+  if (!res.ok) throw new Error(`Google Translate ответил ${res.status}`);
+  const d = (await res.json()) as unknown[];
+  const parts = (d[0] || []) as unknown[][];
+  const text = parts.filter((p) => typeof p[0] === "string").map((p) => p[0]).join("");
+  const rm = parts.find((p) => p[0] === null && p.length > 3);
+  const senses = ((d[1] || []) as [string, string[]][]).map(([pos, words]) => ({ pos: POS[pos] || pos, words: (words || []).slice(0, 6) }));
+  return { word, from: String(d[2] || ""), text, transcription: rm && typeof rm[3] === "string" ? rm[3] : "", senses };
 }
 
 // Google splits on its own; long requests go as a POST body, so a full screen of text fits
@@ -35,6 +93,7 @@ async function google(text: string, to: string): Promise<Translation> {
     body: "q=" + encodeURIComponent(text),
     signal: AbortSignal.timeout(15000)
   });
+  if (res.status === 429) throw new RateLimited();
   if (!res.ok) throw new Error(`Google Translate ответил ${res.status}`);
   const data = (await res.json()) as [Array<[string, string]>, unknown, string];
   return { text: (data[0] || []).map((p) => p[0]).join(""), from: String(data[2] || ""), engine: "google" };

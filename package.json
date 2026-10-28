@@ -1,6 +1,6 @@
 {
   "name": "screen-translator",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Astra plugin: translate on-screen text — region hotkey, live subtitles, Windows OCR",
   "main": "dist/index.js",
   "scripts": {

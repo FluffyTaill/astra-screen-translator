@@ -11,6 +11,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Runtime.Wind
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -84,16 +85,89 @@ namespace ST {
     }
     // Small text OCRs badly: scale the crop up so letters are at least ~20 px tall
     public static byte[] Png(Bitmap src, Rectangle crop, double scale) {
-      int w = Math.Max(1, (int)(crop.Width * scale)), h = Math.Max(1, (int)(crop.Height * scale));
-      using (var b = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
-        using (var g = Graphics.FromImage(b)) {
-          g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-          g.DrawImage(src, new Rectangle(0, 0, w, h), crop, GraphicsUnit.Pixel);
+      using (var b = Scaled(src, crop, scale)) return Encode(b);
+    }
+
+    // The pictures OCR is shown. With enhance: also a contrast-stretched grey copy and a
+    // black-on-white one — game fonts (thin, outlined, over a busy frame) are often read only there
+    public static byte[][] Variants(Bitmap src, Rectangle crop, double scale, bool enhance) {
+      using (var b = Scaled(src, crop, scale)) {
+        var list = new List<byte[]> { Encode(b) };
+        if (enhance) {
+          using (var c = Filter(b, false)) list.Add(Encode(c));
+          using (var t = Filter(b, true)) list.Add(Encode(t));
         }
-        var ms = new MemoryStream();
-        b.Save(ms, ImageFormat.Png);
-        return ms.ToArray();
+        return list.ToArray();
       }
+    }
+
+    static Bitmap Scaled(Bitmap src, Rectangle crop, double scale) {
+      int w = Math.Max(1, (int)(crop.Width * scale)), h = Math.Max(1, (int)(crop.Height * scale));
+      var b = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+      using (var g = Graphics.FromImage(b)) {
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        g.DrawImage(src, new Rectangle(0, 0, w, h), crop, GraphicsUnit.Pixel);
+      }
+      return b;
+    }
+
+    static byte[] Encode(Bitmap b) {
+      var ms = new MemoryStream();
+      b.Save(ms, ImageFormat.Png);
+      return ms.ToArray();
+    }
+
+    // binary=false: grey, brightness stretched so the 2nd..98th percentile fills the range.
+    // binary=true: Otsu threshold; the smaller side of it is taken to be the text and painted black
+    // on white (so light text on a dark frame and white text in a black outline both turn into ink)
+    static Bitmap Filter(Bitmap src, bool binary) {
+      int w = src.Width, h = src.Height, n = w * h;
+      var rect = new Rectangle(0, 0, w, h);
+      var data = src.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+      var px = new byte[data.Stride * h];
+      Marshal.Copy(data.Scan0, px, 0, px.Length);
+      src.UnlockBits(data);
+      var lum = new byte[n];
+      var hist = new int[256];
+      for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        int i = y * data.Stride + x * 4;
+        int l = (px[i + 2] * 299 + px[i + 1] * 587 + px[i] * 114) / 1000;
+        lum[y * w + x] = (byte)l; hist[l]++;
+      }
+      var lut = new byte[256];
+      if (!binary) {
+        int lo = 0, hi = 255, acc = 0;
+        for (int v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * 0.02) { lo = v; break; } }
+        acc = 0;
+        for (int v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= n * 0.02) { hi = v; break; } }
+        if (hi - lo < 16) { lo = 0; hi = 255; }
+        for (int v = 0; v < 256; v++) lut[v] = (byte)Math.Max(0, Math.Min(255, (v - lo) * 255 / (hi - lo)));
+      } else {
+        long sum = 0; for (int v = 0; v < 256; v++) sum += (long)v * hist[v];
+        long sumB = 0; int wB = 0, t = 128; double best = -1;
+        for (int v = 0; v < 256; v++) {
+          wB += hist[v]; if (wB == 0) continue;
+          int wF = n - wB; if (wF == 0) break;
+          sumB += (long)v * hist[v];
+          double mB = (double)sumB / wB, mF = (double)(sum - sumB) / wF;
+          double between = (double)wB * wF * (mB - mF) * (mB - mF);
+          if (between > best) { best = between; t = v; }
+        }
+        int dark = 0; for (int v = 0; v <= t; v++) dark += hist[v];
+        bool textIsDark = dark <= n - dark;
+        for (int v = 0; v < 256; v++) lut[v] = (byte)(((v <= t) == textIsDark) ? 0 : 255);
+      }
+      var outBmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+      var od = outBmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+      var op = new byte[od.Stride * h];
+      for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        byte g = lut[lum[y * w + x]];
+        int i = y * od.Stride + x * 4;
+        op[i] = g; op[i + 1] = g; op[i + 2] = g; op[i + 3] = 255;
+      }
+      Marshal.Copy(op, 0, od.Scan0, op.Length);
+      outBmp.UnlockBits(od);
+      return outBmp;
     }
   }
 
@@ -440,8 +514,32 @@ function Get-Lines($r, [string]$lang) {
     $t = $line.Text
     if ($lang -match '^(ja|zh|ko)') { $t = $t -replace '(?<=[\p{IsCJKUnifiedIdeographs}\p{IsHiragana}\p{IsKatakana}\p{IsHangulSyllables}])\s+(?=[\p{IsCJKUnifiedIdeographs}\p{IsHiragana}\p{IsKatakana}\p{IsHangulSyllables}])', '' }
     $s = Score-Text $t $lang
-    [pscustomobject]@{ text = $t; lang = $lang; left = $left; right = $right; top = $top; bottom = $bottom; h = $bottom - $top; score = $s.score; letters = $s.letters }
+    $words = @($line.Words | ForEach-Object { [pscustomobject]@{ text = $_.Text; x = $_.BoundingRect.X; y = $_.BoundingRect.Y; w = $_.BoundingRect.Width; h = $_.BoundingRect.Height } })
+    [pscustomobject]@{ text = $t; lang = $lang; left = $left; right = $right; top = $top; bottom = $bottom; h = $bottom - $top; score = $s.score; letters = $s.letters; words = $words }
   }
+}
+
+# The word under (or nearest to) a point of the picture, from the most word-like reading of its
+# line. px/py are in picture pixels. Returns the word, its line and its box, or $null
+function Find-Word($byKey, [double]$px, [double]$py) {
+  $best = $null; $bestScore = -1
+  foreach ($k in $byKey.Keys) {
+    foreach ($line in $byKey[$k]) {
+      if ($py -lt $line.top - $line.h * 0.6 -or $py -gt $line.bottom + $line.h * 0.6) { continue }
+      foreach ($wd in $line.words) {
+        # distance from the point to the word box; inside the box is 0
+        $dx = [Math]::Max(0, [Math]::Max($wd.x - $px, $px - ($wd.x + $wd.w)))
+        $dy = [Math]::Max(0, [Math]::Max($wd.y - $py, $py - ($wd.y + $wd.h)))
+        if ($dx -gt $wd.h * 1.5 -or $dy -gt $wd.h) { continue }
+        $core = $wd.text -replace '^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$', ''
+        if (-not ($core -match '\p{L}')) { continue }
+        $s = (Score-Text $core $line.lang).score + $line.score * 0.5 - ($dx + $dy) / [Math]::Max(1, $wd.h)
+        if ($k.StartsWith('0|')) { $s += 0.06 }
+        if ($s -gt $bestScore) { $best = @{ word = $core; line = $line.text; lang = $line.lang; x = $wd.x; y = $wd.y; w = $wd.w; h = $wd.h }; $bestScore = $s }
+      }
+    }
+  }
+  $best
 }
 
 function Overlaps($a, $b) {
@@ -454,27 +552,49 @@ function Overlaps($a, $b) {
 # each LINE keeps the most word-like reading, so English subtitles next to a Russian browser hint
 # both come out right. Lines that look like noise (textures in a video frame, stray symbols,
 # a lone "tv") are dropped. Returns @{ text; lang }
-function Invoke-Ocr([byte[]]$png, [string]$lang, [double]$scale) {
+function To-SoftwareBitmap([byte[]]$png) {
   $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
   $w = New-Object Windows.Storage.Streams.DataWriter($stream.GetOutputStreamAt(0))
   $w.WriteBytes($png)
   $null = Await ($w.StoreAsync()) ([UInt32])
   $dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-  $sb = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-  $tries = if ($lang -and $lang -ne 'auto') { @($lang) } else { $script:allLangs }
-  $byLang = @{}
-  foreach ($l in $tries) {
-    $r = Await ((Get-Engine $l).RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
-    $byLang[$l] = @(Get-Lines $r $l)
+  Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+}
+
+# Every picture variant (as is / contrast / black-on-white, all the same size) is read with every
+# language; the readings compete line by line
+function Read-All($pngs, [string]$lang) {
+  $langs = if ($lang -and $lang -ne 'auto') { @($lang) } else { $script:allLangs }
+  $byKey = [ordered]@{}
+  $v = 0
+  foreach ($png in $pngs) {
+    $sb = To-SoftwareBitmap $png
+    foreach ($l in $langs) {
+      $r = Await ((Get-Engine $l).RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
+      $byKey["$v|$l"] = @(Get-Lines $r $l)
+    }
+    $v++
   }
+  $byKey
+}
+
+function Invoke-Ocr($pngs, [string]$lang, [double]$scale) {
+  $byLang = Read-All $pngs $lang
+  $tries = @($byLang.Keys)
   # the reading with the most good letters is the skeleton; every line of it may be swapped for
   # another language's reading of the same place
-  $base = $tries | Sort-Object { -(($byLang[$_] | ForEach-Object { $_.score * $_.letters } | Measure-Object -Sum).Sum) } | Select-Object -First 1
+  # Enhanced copies (key "1|…", "2|…") must win clearly: on an easy picture they read the same
+  # text with small slips, and a tie goes to the untouched picture
+  $penalty = { param($k) if ($k.StartsWith('0|')) { 0 } else { 0.06 } }
+  $base = $tries | Sort-Object { -((($byLang[$_] | ForEach-Object { $_.score * $_.letters } | Measure-Object -Sum).Sum) * (1 - (& $penalty $_))) }, { $_ } | Select-Object -First 1
   $chosen = foreach ($line in $byLang[$base]) {
-    $best = $line
+    $best = $line; $bestScore = $line.score - (& $penalty $base)
     foreach ($l in $tries) {
       if ($l -eq $base) { continue }
-      foreach ($o in $byLang[$l]) { if ((Overlaps $line $o) -and $o.score -gt $best.score) { $best = $o } }
+      foreach ($o in $byLang[$l]) {
+        $s = $o.score - (& $penalty $l)
+        if ((Overlaps $line $o) -and $s -gt $bestScore) { $best = $o; $bestScore = $s }
+      }
     }
     $best
   }
@@ -511,10 +631,12 @@ function Ocr-Rect([System.Drawing.Rectangle]$rect, [string]$lang) {
   $bmp = [ST.Shot]::Grab($rect)
   try {
     $scale = ScaleFor $rect
-    Invoke-Ocr ([ST.Shot]::Png($bmp, (New-Object System.Drawing.Rectangle(0, 0, $rect.Width, $rect.Height)), $scale)) $lang $scale
+    Invoke-Ocr ([ST.Shot]::Variants($bmp, (New-Object System.Drawing.Rectangle(0, 0, $rect.Width, $rect.Height)), $scale, $script:enhance)) $lang $scale
   } finally { $bmp.Dispose() }
 }
 
+# config op: whether OCR also reads the enhanced copies of the picture (on by default)
+$script:enhance = $true
 $hot = New-Object ST.Hotkeys
 $hotIds = @{}
 $popup = New-Object ST.Bubble
@@ -546,7 +668,7 @@ function Handle($msg) {
         if ($c.ocr) {
           $crop = New-Object System.Drawing.Rectangle(($sel.X - $virt.X), ($sel.Y - $virt.Y), $sel.Width, $sel.Height)
           $scale = ScaleFor $sel
-          $o = Invoke-Ocr ([ST.Shot]::Png($bmp, $crop, $scale)) ([string]$c.lang) $scale
+          $o = Invoke-Ocr ([ST.Shot]::Variants($bmp, $crop, $scale, $script:enhance)) ([string]$c.lang) $scale
         }
         Send @{ ev = 'picked'; req = $c.req; rect = (ArrOf $sel); text = $o.text; lang = $o.lang }
       } finally { $bmp.Dispose() }
@@ -573,13 +695,54 @@ function Handle($msg) {
       $rows = ([string]$c.text -split "`n").Count
       $bmp = New-Object System.Drawing.Bitmap(900, (40 + 60 * $rows))
       $g = [System.Drawing.Graphics]::FromImage($bmp)
-      $g.Clear([System.Drawing.Color]::FromArgb(24, 24, 32))
-      $g.DrawString([string]$c.text, (New-Object System.Drawing.Font('Segoe UI', 26)), [System.Drawing.Brushes]::White, 12, 18)
+      if ($c.style -eq 'faint') {
+        # small, low-contrast text: grey on a slightly lighter grey, the way faded UI hints look
+        $g.Clear([System.Drawing.Color]::FromArgb(96, 98, 104))
+        $g.DrawString([string]$c.text, (New-Object System.Drawing.Font('Segoe UI', 9)), (New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(128, 131, 138))), 12, 18)
+      } elseif ($c.style -eq 'game') {
+        # a busy bright frame with white text in a dark outline, the way game subtitles look
+        $rnd = New-Object System.Random 7
+        for ($k = 0; $k -lt 160; $k++) {
+          $br = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($rnd.Next(120, 256), $rnd.Next(120, 256), $rnd.Next(60, 200)))
+          $g.FillEllipse($br, $rnd.Next(-40, 900), $rnd.Next(-40, $bmp.Height), $rnd.Next(20, 120), $rnd.Next(20, 120)); $br.Dispose()
+        }
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $path.AddString([string]$c.text, (New-Object System.Drawing.FontFamily('Segoe UI')), 0, 30, (New-Object System.Drawing.PointF(12, 18)), [System.Drawing.StringFormat]::GenericDefault)
+        $g.SmoothingMode = 'AntiAlias'
+        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::Black), 5
+        $g.DrawPath($pen, $path); $g.FillPath([System.Drawing.Brushes]::White, $path)
+      } else {
+        $g.Clear([System.Drawing.Color]::FromArgb(24, 24, 32))
+        $g.DrawString([string]$c.text, (New-Object System.Drawing.Font('Segoe UI', 26)), [System.Drawing.Brushes]::White, 12, 18)
+      }
       $g.Dispose()
       $t0 = [Diagnostics.Stopwatch]::StartNew()
-      try { $o = Invoke-Ocr ([ST.Shot]::Png($bmp, (New-Object System.Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)), 1.0)) ([string]$c.lang) 1.0 } finally { $bmp.Dispose() }
-      Send @{ ev = 'selftest'; req = $c.req; text = $o.text; lang = $o.lang; ms = $t0.ElapsedMilliseconds }
+      $enh = if ($null -ne $c.enhance) { [bool]$c.enhance } else { $script:enhance }
+      $hit = $null
+      try {
+        $vars = [ST.Shot]::Variants($bmp, (New-Object System.Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)), 1.0, $enh)
+        $o = Invoke-Ocr $vars ([string]$c.lang) 1.0
+        # px/py — проверка «слова под курсором» на этой же картинке
+        if ($null -ne $c.px) { $hit = Find-Word (Read-All $vars ([string]$c.lang)) ([double]$c.px) ([double]$c.py) }
+      } finally { $bmp.Dispose() }
+      Send @{ ev = 'selftest'; req = $c.req; text = $o.text; lang = $o.lang; ms = $t0.ElapsedMilliseconds; word = $(if ($hit) { $hit.word } else { $null }) }
     }
+    'word' {
+      # a strip around the cursor, wide enough for the word and its line
+      $p = [System.Windows.Forms.Cursor]::Position
+      $virt = [ST.Shot]::Virtual()
+      $area = [System.Drawing.Rectangle]::Intersect((New-Object System.Drawing.Rectangle(($p.X - 450), ($p.Y - 70), 900, 140)), $virt)
+      $bmp = [ST.Shot]::Grab($area)
+      try {
+        $scale = 3.0
+        $byKey = Read-All ([ST.Shot]::Variants($bmp, (New-Object System.Drawing.Rectangle(0, 0, $area.Width, $area.Height)), $scale, $script:enhance)) ([string]$c.lang)
+        $hit = Find-Word $byKey (($p.X - $area.X) * $scale) (($p.Y - $area.Y) * $scale)
+      } finally { $bmp.Dispose() }
+      if (-not $hit) { Send @{ ev = 'word'; req = $c.req; found = $false; rect = @($p.X - 20, $p.Y - 10, 40, 20) }; return }
+      $r = @([int]($area.X + $hit.x / $scale), [int]($area.Y + $hit.y / $scale), [int][Math]::Max(1, $hit.w / $scale), [int][Math]::Max(1, $hit.h / $scale))
+      Send @{ ev = 'word'; req = $c.req; found = $true; word = $hit.word; line = $hit.line; lang = $hit.lang; rect = $r }
+    }
+    'config' { if ($null -ne $c.enhance) { $script:enhance = [bool]$c.enhance } }
     'clip' { if ($c.text) { [System.Windows.Forms.Clipboard]::SetText([string]$c.text) } }
     'exit' { [System.Windows.Forms.Application]::Exit() }
   }

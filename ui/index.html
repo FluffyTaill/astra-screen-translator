@@ -58,6 +58,13 @@ input:checked+.tg::after{left:19px;background:#fff}
 .mod.on{background:var(--accent);border-color:transparent;color:var(--on-accent)}
 .mod:disabled{opacity:.4;cursor:default}
 .hk select{font-family:Consolas,monospace;font-weight:700;min-width:96px}
+.gl{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+.gl:first-child{border-top:0}
+.gl .gf{font-weight:700;min-width:0;overflow-wrap:anywhere}
+.gl .gt{flex:1;min-width:0;overflow-wrap:anywhere}
+.gl .btn{padding:4px 10px}
+.bad{color:var(--bad)}
+.good{color:var(--ok)}
 code{background:var(--field);padding:2px 6px;border-radius:6px;font-size:12px}
 </style>
 </head>
@@ -78,6 +85,7 @@ code{background:var(--field);padding:2px 6px;border-radius:6px;font-size:12px}
       <div class="key"><div><b>Перевести область</b><span class="muted">выделяешь мышкой — перевод рядом</span></div><div class="hk" data-hk="hotkeyRegion"></div></div>
       <div class="key"><div><b>Субтитры вкл/выкл</b><span class="muted">область переводится каждую секунду</span></div><div class="hk" data-hk="hotkeyLive"></div></div>
       <div class="key"><div><b>Перевести активное окно</b><span class="muted">всё окно целиком</span></div><div class="hk" data-hk="hotkeyWindow"></div></div>
+      <div class="key"><div><b>Слово под курсором</b><span class="muted">наведи мышь на слово — перевод, транскрипция, значения</span></div><div class="hk" data-hk="hotkeyWord"></div></div>
     </div>
   </div>
 
@@ -85,6 +93,7 @@ code{background:var(--field);padding:2px 6px;border-radius:6px;font-size:12px}
     <h2>Языки и переводчик</h2>
     <div class="grid">
       <label class="sw"><span>Язык текста на экране</span><select data-k="ocrLang" id="ocrLang"></select></label>
+      <label class="sw"><span>Улучшать картинку для игровых шрифтов<br><span class="muted">читает ещё контрастную и чёрно-белую копию снимка: бледный, мелкий и обведённый текст. Чуть медленнее</span></span><input type="checkbox" data-k="enhance"><span class="tg"></span></label>
       <label class="sw"><span>Переводить на</span><select data-k="to" id="to"></select></label>
       <label class="sw"><span>Переводчик</span><select data-k="engine"><option value="google">Google — бесплатно, без ключа</option><option value="deepl">DeepL — нужен ключ</option></select></label>
       <label class="sw" id="deeplRow"><span>Ключ DeepL</span><input type="password" data-k="deeplKey" placeholder="xxxx:fx" style="width:180px"></label>
@@ -107,14 +116,25 @@ code{background:var(--field);padding:2px 6px;border-radius:6px;font-size:12px}
   </div>
 
   <div class="card">
-    <h2>Нет нужного языка текста?</h2>
-    <div class="muted" style="font-size:13px;line-height:1.6">
-      Windows распознаёт языки, которые у неё установлены. Японский, китайский, корейский и другие ставятся бесплатно:
-      <b>Параметры → Время и язык → Язык и регион → Добавить язык</b>.
-      Или в PowerShell от имени администратора: <code>Add-WindowsCapability -Online -Name "Language.OCR~~~ja-JP~0.0.1.0"</code>.
-      После установки перезапусти плагин.<br>
-      Не видно перевода в игре? Включи в игре режим «окно без рамки» (borderless): поверх эксклюзивного полноэкранного режима Windows ничего не показывает.
+    <h2>Свой словарь</h2>
+    <div class="muted" style="margin-bottom:10px">Как переводить имена и термины. Пустой перевод — оставить слово как в оригинале (например, имя персонажа).</div>
+    <div id="glossary"></div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="gFrom" placeholder="В оригинале: Stamina" style="flex:1;min-width:140px">
+      <input type="text" id="gTo" placeholder="Перевод: Выносливость (пусто — не переводить)" style="flex:1.4;min-width:160px">
+      <button class="btn primary" id="gAdd">Добавить</button>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Языки распознавания</h2>
+    <div class="muted" style="margin-bottom:10px">Windows читает только те языки, что у неё установлены. Сейчас: <b id="haveLangs">…</b></div>
+    <div class="row">
+      <select id="packSel" style="flex:1;min-width:180px"></select>
+      <button class="btn primary" id="packAdd">Установить</button>
+    </div>
+    <div class="muted" id="packNote" style="margin-top:8px">Windows попросит разрешение администратора — нажми «Да». Пакет скачивается с серверов Microsoft, ~10–30 МБ.</div>
+    <div class="muted" style="margin-top:12px">Не видно перевода в игре? Включи в игре режим «окно без рамки» (borderless): поверх эксклюзивного полноэкранного режима Windows ничего не показывает.</div>
   </div>
 </div>
 <script src="./app.js"></script>

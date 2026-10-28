@@ -10,7 +10,7 @@ let note = "";
 function renderWarns() {
   const w = note ? [note] : [];
   if (state.failedHotkeys && state.failedHotkeys.length)
-    w.push(`<div class="err">Эти сочетания заняты другой программой — выбери другие: ${state.failedHotkeys.map((id) => esc(state.settings[{ region: "hotkeyRegion", live: "hotkeyLive", window: "hotkeyWindow" }[id]])).join(", ")}</div>`);
+    w.push(`<div class="err">Эти сочетания заняты другой программой — выбери другие: ${state.failedHotkeys.map((id) => esc(state.settings[{ region: "hotkeyRegion", live: "hotkeyLive", window: "hotkeyWindow", word: "hotkeyWord" }[id]])).join(", ")}</div>`);
   if (!state.languages.length) w.push(`<div class="notice">Не удалось связаться с распознаванием Windows. Нужна Windows 10 или 11; попробуй перезапустить плагин.</div>`);
   if (state.lastError) w.push(`<div class="muted" style="margin-bottom:10px">Последняя ошибка: ${esc(state.lastError)}</div>`);
   $("warns").innerHTML = w.join("");
@@ -30,6 +30,8 @@ function renderSettings() {
   });
   document.querySelectorAll("[data-hk]").forEach((el) => renderHotkey(el, s[el.dataset.hk]));
   $("deeplRow").style.display = s.engine === "deepl" ? "" : "none";
+  renderGlossary();
+  renderPacks();
   const c = state.command;
   $("speakNote").innerHTML = !s.speak ? "" : !c.inFile
     ? `<div class="notice" style="margin-top:10px">Чтобы Astra читала перевод, нужна команда. <button class="btn primary" id="mk">Создать команду</button> <span class="muted">Появится после перезапуска Astra.</span></div>`
@@ -45,7 +47,47 @@ function renderSettings() {
 async function refresh(all) {
   state = await call("getState");
   renderWarns();
-  if (all) renderSettings();
+  if (all) renderSettings(); else renderPacks();
+}
+
+// ── свой словарь ──
+function renderGlossary() {
+  const g = state.settings.glossary || [];
+  $("glossary").innerHTML = g.length ? g.map((r, i) => `<div class="gl"><span class="gf">${esc(r.from)}</span><span class="muted">→</span><span class="gt">${r.to ? esc(r.to) : '<span class="muted">не переводить</span>'}</span><button class="btn" data-del="${i}" title="Удалить">✕</button></div>`).join("")
+    : `<div class="muted">Пока пусто.</div>`;
+  document.querySelectorAll("[data-del]").forEach((b) => {
+    b.onclick = () => save({ glossary: g.filter((_, i) => i !== Number(b.dataset.del)) });
+  });
+}
+
+function addRule() {
+  const from = $("gFrom").value.trim();
+  if (!from) return;
+  const to = $("gTo").value.trim();
+  const g = (state.settings.glossary || []).filter((r) => r.from.toLowerCase() !== from.toLowerCase());
+  $("gFrom").value = ""; $("gTo").value = "";
+  save({ glossary: [...g, { from, to }] });
+}
+
+// ── языки распознавания ──
+function renderPacks() {
+  if (!state.ocrPacks) return;
+  const have = state.languages.map((l) => l.tag.toLowerCase());
+  const has = (tag) => have.some((h) => h === tag.toLowerCase() || h === tag.split("-")[0].toLowerCase() || h.split("-")[0] === tag.split("-")[0].toLowerCase());
+  $("haveLangs").textContent = state.languages.map((l) => l.name).join(", ") || "—";
+  const sel = $("packSel");
+  const keep = sel.value;
+  const missing = state.ocrPacks.filter((p) => !has(p.tag));
+  if (sel.dataset.sig !== missing.map((p) => p.tag).join()) {
+    sel.dataset.sig = missing.map((p) => p.tag).join();
+    sel.innerHTML = missing.length ? missing.map((p) => `<option value="${p.tag}">${esc(p.name)}</option>`).join("") : `<option value="">все из списка уже есть</option>`;
+    if (missing.some((p) => p.tag === keep)) sel.value = keep;
+  }
+  const st = state.ocrInstall;
+  const running = st.state === "running";
+  $("packAdd").disabled = running || !missing.length;
+  $("packAdd").textContent = running ? "Устанавливаю…" : "Установить";
+  if (st.state !== "idle") $("packNote").innerHTML = `<span class="${st.state === "error" ? "bad" : st.state === "done" ? "good" : ""}">${esc(st.message)}</span>`;
 }
 
 async function save(patch) {
@@ -65,7 +107,7 @@ const KEY_LIST = [
   "Space", "`", "Insert", "Delete", "Home", "End", "PageUp", "PageDown", "Pause", "PrintScreen",
   "Up", "Down", "Left", "Right", ...Array.from({ length: 10 }, (_, i) => `Num${i}`)
 ];
-const HK_ID = { hotkeyRegion: "region", hotkeyLive: "live", hotkeyWindow: "window" };
+const HK_ID = { hotkeyRegion: "region", hotkeyLive: "live", hotkeyWindow: "window", hotkeyWord: "word" };
 
 function splitCombo(value) {
   const parts = (value || "").split("+").map((p) => p.trim()).filter(Boolean);
@@ -108,6 +150,15 @@ function renderHotkey(el, value) {
   document.querySelectorAll("[data-k]").forEach((el) => {
     el.onchange = () => save({ [el.dataset.k]: el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value });
   });
+  $("gAdd").onclick = addRule;
+  $("gTo").onkeydown = (e) => { if (e.key === "Enter") addRule(); };
+  $("packAdd").onclick = async () => {
+    const tag = $("packSel").value;
+    if (!tag) return;
+    $("packAdd").disabled = true;
+    try { await call("installOcr", { tag }); } catch (e) { $("packNote").textContent = e.message; }
+    refresh(false);
+  };
   $("tryRegion").onclick = () => call("translateRegion").catch(() => {});
   $("toggleLive").onclick = async () => { await call("toggleLive").catch(() => {}); setTimeout(() => refresh(false), 600); };
   setInterval(() => refresh(false).catch(() => {}), 3000);

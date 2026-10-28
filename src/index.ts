@@ -9,9 +9,10 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { plugin, s, tool, type PluginContext } from "astra-plugin-sdk";
 import { Helper, type HotkeySpec, type Rect } from "./helper";
-import { normalize, similar, translate, worthTranslating, type Engine } from "./translate";
+import { dictionary, normalize, RateLimited, similar, translate, worthTranslating, type DictEntry, type Engine, type GlossaryRule } from "./translate";
 
 const ASTRA = path.join(process.env.APPDATA || "", "astra");
 const DATA = path.join(ASTRA, "screen-translator");
@@ -24,6 +25,7 @@ export interface Settings {
   hotkeyRegion: string;
   hotkeyLive: string;
   hotkeyWindow: string;
+  hotkeyWord: string;      // слово под курсором → карточка с переводом
   ocrLang: string;        // язык текста на экране: "auto" — пробуются все языки Windows
   to: string;             // на какой язык переводить
   engine: Engine;
@@ -38,11 +40,14 @@ export interface Settings {
   showOriginal: boolean;
   copy: boolean;
   speak: boolean;
+  enhance: boolean;        // читать и улучшенные копии снимка (игровые шрифты, бледный текст)
+  glossary: GlossaryRule[]; // свой словарь: термин → перевод (пусто — не переводить)
 }
 export const DEFAULTS: Settings = {
-  hotkeyRegion: "Ctrl+Alt+T", hotkeyLive: "Ctrl+Alt+Y", hotkeyWindow: "Ctrl+Alt+W",
+  hotkeyRegion: "Ctrl+Alt+T", hotkeyLive: "Ctrl+Alt+Y", hotkeyWindow: "Ctrl+Alt+W", hotkeyWord: "Ctrl+Alt+D",
   ocrLang: "auto", to: "ru", engine: "google", deeplKey: "", fontSize: 15, popupSec: 15,
-  liveMs: 500, livePlace: "over", liveX: null, liveY: null, liveKeep: 3, showOriginal: false, copy: false, speak: false
+  liveMs: 500, livePlace: "over", liveX: null, liveY: null, liveKeep: 3, showOriginal: false, copy: false, speak: false,
+  enhance: true, glossary: []
 };
 
 export function cleanSettings(raw: unknown): Settings {
@@ -58,7 +63,7 @@ export function cleanSettings(raw: unknown): Settings {
     return v === "" || parseHotkey(v) ? v : DEFAULTS[k] as string;
   };
   return {
-    hotkeyRegion: hotkey("hotkeyRegion"), hotkeyLive: hotkey("hotkeyLive"), hotkeyWindow: hotkey("hotkeyWindow"),
+    hotkeyRegion: hotkey("hotkeyRegion"), hotkeyLive: hotkey("hotkeyLive"), hotkeyWindow: hotkey("hotkeyWindow"), hotkeyWord: hotkey("hotkeyWord"),
     ocrLang: str("ocrLang") === "auto" || /^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/.test(str("ocrLang")) ? str("ocrLang") : DEFAULTS.ocrLang,
     to: /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(str("to")) ? str("to") : DEFAULTS.to,
     engine: r.engine === "deepl" ? "deepl" : "google",
@@ -68,8 +73,16 @@ export function cleanSettings(raw: unknown): Settings {
     liveX: Number.isFinite(Number(r.liveX)) && r.liveX !== null ? Math.round(Number(r.liveX)) : null,
     liveY: Number.isFinite(Number(r.liveY)) && r.liveY !== null ? Math.round(Number(r.liveY)) : null,
     liveKeep: num("liveKeep", 1, 6),
-    showOriginal: bool("showOriginal"), copy: bool("copy"), speak: bool("speak")
+    showOriginal: bool("showOriginal"), copy: bool("copy"), speak: bool("speak"), enhance: bool("enhance"),
+    glossary: cleanGlossary(r.glossary)
   };
+}
+
+export function cleanGlossary(raw: unknown): GlossaryRule[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((x) => x && typeof x === "object" && typeof x.from === "string" && x.from.trim())
+    .slice(0, 300)
+    .map((x) => ({ from: String(x.from).trim().slice(0, 80), to: typeof x.to === "string" ? x.to.trim().slice(0, 120) : "" }));
 }
 
 // «Ctrl+Alt+T» → флаги RegisterHotKey и код клавиши
@@ -117,7 +130,7 @@ function warn(msg: string) {
 
 function applyHotkeys() {
   const list: HotkeySpec[] = [];
-  for (const [id, key] of [["region", settings.hotkeyRegion], ["live", settings.hotkeyLive], ["window", settings.hotkeyWindow]] as const) {
+  for (const [id, key] of [["region", settings.hotkeyRegion], ["live", settings.hotkeyLive], ["window", settings.hotkeyWindow], ["word", settings.hotkeyWord]] as const) {
     const k = key && parseHotkey(key);
     if (k) list.push({ id, ...k });
   }
@@ -167,7 +180,7 @@ async function say(text: string) {
 const badgeOf = (from: string) => (from ? `${from.split("-")[0].toUpperCase()} → ${settings.to.split("-")[0].toUpperCase()}` : "");
 
 async function deliver(rect: Rect, original: string, style: "card" | "subs", where: "below" | "bottom", ms: number, speak: boolean) {
-  const t = await translate(original, settings.to, settings.engine, settings.deeplKey);
+  const t = await translate(original, settings.to, settings.engine, settings.deeplKey, settings.glossary);
   await helper.show(rect, t.text, { style, where, size: settings.fontSize, ms, original: settings.showOriginal ? original : "", badge: badgeOf(t.from) });
   if (settings.copy) await helper.fire({ op: "clip", text: t.text }).catch(() => {});
   if (speak && settings.speak) void say(t.text);
@@ -192,12 +205,74 @@ export async function translateRegion(): Promise<string> {
 }
 
 // Весь экран или активное окно — для голоса и третьей горячей клавиши
+// Слово под курсором: карточка с переводом, транскрипцией и значениями по частям речи
+export function wordCard(d: DictEntry, glossaryHit?: GlossaryRule) {
+  const head = glossaryHit ? (glossaryHit.to || d.word) : d.text;
+  const lines = [head, ...d.senses.filter((s) => s.words.length).slice(0, 4).map((s) => `${s.pos} ${s.words.join(", ")}`)];
+  return { text: lines.join("\n"), original: d.transcription ? `${d.word}   [${d.transcription}]` : d.word };
+}
+
+export async function lookupWord(): Promise<string> {
+  const r = await helper.word(settings.ocrLang);
+  if (!r.found) {
+    await helper.show(r.rect, "Не нашла слово под курсором — наведи мышь прямо на него.", { style: "card", where: "below", size: settings.fontSize, ms: 2500 });
+    return "Под курсором нет слова.";
+  }
+  const g = settings.glossary.find((x) => x.from.trim().toLowerCase() === r.word.toLowerCase());
+  const d = await dictionary(r.word, settings.to);
+  const card = wordCard(d, g);
+  await helper.show(r.rect, card.text, { style: "card", where: "below", size: settings.fontSize, ms: popupMs(), original: card.original, badge: badgeOf(d.from) });
+  return `${r.word}: ${card.text}`;
+}
+
+// ── языки распознавания Windows одной кнопкой ──
+// Add-WindowsCapability требует прав администратора: Windows сама спросит подтверждение (UAC)
+export const OCR_PACKS: { tag: string; name: string }[] = [
+  { tag: "ja-JP", name: "Японский" }, { tag: "zh-CN", name: "Китайский (упрощённый)" }, { tag: "zh-TW", name: "Китайский (традиционный)" },
+  { tag: "ko-KR", name: "Корейский" }, { tag: "de-DE", name: "Немецкий" }, { tag: "fr-FR", name: "Французский" },
+  { tag: "es-ES", name: "Испанский" }, { tag: "it-IT", name: "Итальянский" }, { tag: "pt-BR", name: "Португальский" },
+  { tag: "pl-PL", name: "Польский" }, { tag: "uk-UA", name: "Украинский" }, { tag: "tr-TR", name: "Турецкий" },
+  { tag: "en-US", name: "Английский" }, { tag: "ru-RU", name: "Русский" }
+];
+const ocrInstall = { tag: "", state: "idle" as "idle" | "running" | "done" | "error", message: "" };
+
+export function installCommand(tag: string) {
+  if (!OCR_PACKS.some((p) => p.tag === tag)) throw new Error(`нет такого языка: ${tag}`);
+  const inner = `Add-WindowsCapability -Online -Name 'Language.OCR~~~${tag}~0.0.1.0' | Out-Null`;
+  // внешний PowerShell без прав запускает внутренний с правами администратора и ждёт его
+  return `$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command', "${inner}"); exit $p.ExitCode`;
+}
+
+async function installOcrLanguage(tag: string) {
+  Object.assign(ocrInstall, { tag, state: "running", message: "Windows спросит разрешение — нажми «Да». Установка займёт минуту-две." });
+  const code = await new Promise<number>((resolve) => {
+    const p = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", installCommand(tag)], { windowsHide: true });
+    let err = "";
+    p.stderr.on("data", (d) => { err += d; });
+    p.on("exit", (c) => {
+      if (c !== 0 && /cancel|отмен/i.test(err)) ocrInstall.message = "Установка отменена в окне Windows.";
+      resolve(c ?? 1);
+    });
+  });
+  if (code !== 0) {
+    Object.assign(ocrInstall, { state: "error", message: ocrInstall.message.startsWith("Установка отменена") ? ocrInstall.message : `Не установилось (код ${code}). Можно поставить вручную: Параметры → Время и язык → Язык и регион.` });
+    return;
+  }
+  await helper.restart().catch((e) => warn((e as Error).message));
+  languagesCache = null;
+  const langs = await helper.languages().catch(() => []);
+  const ok = langs.some((l) => l.tag.toLowerCase().startsWith(tag.split("-")[0].toLowerCase()));
+  Object.assign(ocrInstall, ok
+    ? { state: "done", message: `Готово: ${OCR_PACKS.find((p) => p.tag === tag)?.name} распознаётся.` }
+    : { state: "error", message: "Windows установила пакет, но язык пока не виден — перезагрузи компьютер." });
+}
+
 export async function translateWhole(target: "screen" | "window", show: boolean): Promise<string> {
   const r = await helper.ocr({ target, lang: settings.ocrLang });
   const text = r.text.trim();
   if (!worthTranslating(text)) return "На экране не нашлось текста для перевода.";
   // ответ получает ИИ Astra и сам его озвучит — свой голос поверх не нужен
-  const t = show ? await deliver(r.rect, text, "card", "below", popupMs(), false) : await translate(text, settings.to, settings.engine, settings.deeplKey);
+  const t = show ? await deliver(r.rect, text, "card", "below", popupMs(), false) : await translate(text, settings.to, settings.engine, settings.deeplKey, settings.glossary);
   return `Оригинал: ${text}\nПеревод: ${t.text}`;
 }
 
@@ -246,7 +321,7 @@ export function liveUpdate(st: LiveState, paragraphs: string[], now: number, hol
 
 const live = {
   on: false, rect: null as Rect | null, busy: false, timer: null as NodeJS.Timeout | null,
-  state: { phrases: [], pending: new Map() } as LiveState, shown: ""
+  state: { phrases: [], pending: new Map() } as LiveState, shown: "", pauseUntil: 0
 };
 
 function liveWhere(): { where: string; anchor: Rect } {
@@ -293,7 +368,7 @@ export function stopLive() {
 }
 
 async function liveTick() {
-  if (!live.on || live.busy || !live.rect) return;
+  if (!live.on || live.busy || !live.rect || Date.now() < live.pauseUntil) return;
   live.busy = true;
   try {
     const r = await helper.ocr({ rect: live.rect, lang: settings.ocrLang });
@@ -302,10 +377,17 @@ async function liveTick() {
     for (const f of todo) {
       const asked = f.src;
       f.asked = asked;
-      void translate(asked, settings.to, settings.engine, settings.deeplKey).then((t) => {
+      void translate(asked, settings.to, settings.engine, settings.deeplKey, settings.glossary).then((t) => {
         if (f.src === asked || !f.text) f.text = t.text;
         if (live.on) return renderLive();
-      }).catch((e) => warn(`субтитры: ${(e as Error).message}`));
+      }).catch((e) => {
+        // Google ограничил запросы — субтитры отдыхают полминуты, а не долбят его каждые полсекунды
+        if (e instanceof RateLimited && Date.now() >= live.pauseUntil) {
+          live.pauseUntil = Date.now() + 30000;
+          void helper.show(live.rect!, "Google временно ограничил перевод — продолжу через 30 секунд", { style: "subs", where: liveWhere().where as "below", size: settings.fontSize, ms: 4000 });
+        }
+        warn(`субтитры: ${(e as Error).message}`);
+      });
     }
     await renderLive();
   } catch (e) {
@@ -320,6 +402,7 @@ async function onHotkey(id: string) {
     if (id === "region") await translateRegion();
     else if (id === "live") { if (live.on) stopLive(); else await startLive(); }
     else if (id === "window") await translateWhole("window", true);
+    else if (id === "word") await lookupWord();
   } catch (e) {
     warn((e as Error).message);
   }
@@ -389,7 +472,7 @@ const param = (p: unknown, k: string) => (p && typeof p === "object" ? (p as Rec
 const background = (fn: () => Promise<unknown>) => { void fn().catch((e) => warn((e as Error).message)); return { started: true }; };
 
 export { Helper };
-export { similar, translate, worthTranslating } from "./translate";
+export { similar, translate, worthTranslating, dictionary, protect, restore, RateLimited } from "./translate";
 export const app = plugin({
   id: "screen-translator",
   tools: {
@@ -419,6 +502,7 @@ export const app = plugin({
     ctxRef = ctx;
     if (process.env.ST_NO_HELPER === "1") return; // тесты в процессе: без PowerShell и глобальных клавиш
     void applyHotkeys();
+    void helper.setConfig({ enhance: settings.enhance });
     await helper.start().catch((e) => warn((e as Error).message));
   },
   onShutdown: () => {
@@ -437,24 +521,32 @@ export const app = plugin({
         return {
           settings: { ...settings, deeplKey: settings.deeplKey ? "••••" + settings.deeplKey.slice(-4) : "" },
           languages: languagesCache || [], failedHotkeys: helper.failedHotkeys, live: live.on,
+          ocrPacks: OCR_PACKS, ocrInstall,
           lastError, command: commandStatus(ctx)
         };
       },
       saveSettings: async (p: unknown) => {
         const patch = { ...(p && typeof p === "object" ? p : {}) } as Record<string, unknown>;
         if (typeof patch.deeplKey === "string" && patch.deeplKey.startsWith("••••")) delete patch.deeplKey;
-        const before = [settings.hotkeyRegion, settings.hotkeyLive, settings.hotkeyWindow].join();
+        const before = [settings.hotkeyRegion, settings.hotkeyLive, settings.hotkeyWindow, settings.hotkeyWord].join();
         settings = cleanSettings({ ...settings, ...patch });
         save(SETTINGS, settings);
-        if (before !== [settings.hotkeyRegion, settings.hotkeyLive, settings.hotkeyWindow].join()) await applyHotkeys();
+        if (before !== [settings.hotkeyRegion, settings.hotkeyLive, settings.hotkeyWindow, settings.hotkeyWord].join()) await applyHotkeys();
+        await helper.setConfig({ enhance: settings.enhance });
         if (live.on && live.timer) { clearInterval(live.timer); live.timer = setInterval(() => void liveTick(), settings.liveMs); }
         await new Promise((r) => setTimeout(r, 300)); // помощник успеет ответить, какие клавиши заняты
         return { settings: { ...settings, deeplKey: settings.deeplKey ? "••••" + settings.deeplKey.slice(-4) : "" }, failedHotkeys: helper.failedHotkeys };
       },
       translateRegion: async () => background(translateRegion),
       toggleLive: async () => background(async () => (live.on ? stopLive() : startLive())),
+      installOcr: async (p: unknown) => {
+        if (ocrInstall.state === "running") return { started: false };
+        const tag = String(param(p, "tag") || "");
+        installCommand(tag); // проверка, что язык из списка
+        return background(() => installOcrLanguage(tag));
+      },
       createCommand: async (_p: unknown, ctx: PluginContext) => createCommand(ctx),
-      testTranslate: async (p: unknown) => translate(String(param(p, "text") || "Press E to open the door."), settings.to, settings.engine, settings.deeplKey)
+      testTranslate: async (p: unknown) => translate(String(param(p, "text") || "Press E to open the door."), settings.to, settings.engine, settings.deeplKey, settings.glossary)
     }
   },
   healthCheck: () => ({ healthy: true, status: lastError ? `ok (последняя ошибка: ${lastError})` : "ok" })
