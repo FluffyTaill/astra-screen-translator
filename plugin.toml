@@ -1,7 +1,7 @@
 [plugin]
 id = "screen-translator"
 name = "Screen Translator"
-version = "0.2.1"
+version = "0.2.2"
 description = "Translate any text on screen: select a region with a hotkey, or turn on live subtitles for game dialogs and videos. Text is recognized locally by Windows OCR"
 author = "Taill"
 license = "MIT"

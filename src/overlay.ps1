@@ -254,6 +254,8 @@ namespace ST {
     Point dragWin;
     bool dragged;
     bool copied;
+    // long text: it scrolls with the wheel; while the mouse is over the window it does not hide
+    int scroll, contentH, viewTop, viewH, lifeMs;
     readonly System.Windows.Forms.Timer life = new System.Windows.Forms.Timer();
     readonly System.Windows.Forms.Timer copiedTimer = new System.Windows.Forms.Timer();
     static readonly string IconFont = FontFamily.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
@@ -288,7 +290,19 @@ namespace ST {
         dragFrom = null;
         if (dragged) Io.Send("{\"ev\":\"moved\",\"cx\":" + (Left + Width / 2) + ",\"y\":" + Top + "}");
       };
-      MouseLeave += (s, e) => { if (hot != -1) { hot = -1; Invalidate(); } };
+      MouseEnter += (s, e) => life.Stop();
+      MouseLeave += (s, e) => {
+        if (hot != -1) { hot = -1; Invalidate(); }
+        // the mouse left: a little more time to finish the last line, then hide as asked
+        if (lifeMs > 0 && Visible) { life.Interval = Math.Max(4000, Math.Min(lifeMs, 15000)); life.Start(); }
+      };
+      MouseWheel += (s, e) => {
+        int max = Math.Max(0, contentH - viewH);
+        if (max == 0) return;
+        int step = (int)(MainLineHeight() * 3);
+        scroll = Math.Max(0, Math.Min(max, scroll - Math.Sign(e.Delta) * step));
+        Invalidate();
+      };
       MouseClick += (s, e) => {
         if (subs) return;   // subtitles are switched off with their hotkey, a click only drags
         switch (ButtonAt(e.Location)) {
@@ -354,8 +368,12 @@ namespace ST {
       }
       int contentW = (int)Math.Ceiling(Math.Max(main.Width, orgSz.Width));
       int w = subs ? Math.Min(maxW, contentW + Pad * 2 + 6) : maxW;
-      int h = (subs ? Pad - 4 : HeadH + 6) + (original.Length > 0 ? (int)orgSz.Height + 6 : 0) + (int)Math.Ceiling(main.Height) + (subs ? Pad - 4 : Pad);
-      h = Math.Min(scr.Height - 40, h);
+      viewTop = subs ? Pad - 4 : HeadH + 6;
+      contentH = (original.Length > 0 ? (int)orgSz.Height + 6 : 0) + (int)Math.Ceiling(main.Height);
+      int bottomPad = subs ? Pad - 4 : Pad;
+      int h = Math.Min(scr.Height - 40, viewTop + contentH + bottomPad);
+      viewH = h - viewTop - bottomPad;
+      scroll = 0;
       int x, y;
       if (placement == "bottom") {
         x = scr.X + (scr.Width - w) / 2;
@@ -386,8 +404,12 @@ namespace ST {
       Invalidate();
       if (!Visible) Show();
       life.Stop();
-      if (ms > 0) { life.Interval = ms; life.Start(); }
+      lifeMs = ms;
+      // the mouse is already over the new window: keep it until the mouse leaves
+      if (ms > 0 && !Bounds.Contains(Cursor.Position)) { life.Interval = ms; life.Start(); }
     }
+
+    float MainLineHeight() { using (var f = MainFont()) return f.GetHeight(); }
 
     static GraphicsPath Rounded(Rectangle r, int rad) {
       var p = new GraphicsPath();
@@ -424,17 +446,30 @@ namespace ST {
         }
       }
       int inner = Width - Pad * 2;
+      bool scrolls = contentH > viewH;
       var fmt = new StringFormat();
       if (subs) fmt.Alignment = StringAlignment.Center;
+      // the text area is clipped and shifted by the scroll position
+      var clip = g.Clip;
+      g.SetClip(new Rectangle(0, viewTop, Width, viewH + 4));
+      y = viewTop - scroll;
       if (original.Length > 0) using (var of = OrigFont()) using (var mb = new SolidBrush(Muted)) {
         var sz = g.MeasureString(original, of, inner);
         g.DrawString(original, of, mb, new RectangleF(Pad, y, inner, sz.Height), fmt);
         y += (int)sz.Height + 6;
       }
       using (var f = MainFont()) {
-        var area = new RectangleF(Pad, y, inner, Height - y - (subs ? Pad - 4 : Pad) + 4);
+        var area = new RectangleF(Pad, y, inner, contentH + 8);
         if (subs) using (var sh = new SolidBrush(Color.FromArgb(160, 0, 0, 0))) g.DrawString(text, f, sh, new RectangleF(area.X + 1, area.Y + 1, area.Width, area.Height), fmt);
         using (var fg = new SolidBrush(Color.FromArgb(242, 242, 246))) g.DrawString(text, f, fg, area, fmt);
+      }
+      g.Clip = clip;
+      if (scrolls) {
+        // a thin bar on the right: where in the text you are
+        int track = viewH - 8, thumb = Math.Max(24, track * viewH / contentH);
+        int pos = viewTop + 4 + (track - thumb) * scroll / Math.Max(1, contentH - viewH);
+        using (var tb = new SolidBrush(Color.FromArgb(40, 255, 255, 255))) g.FillRectangle(tb, Width - 7, viewTop + 4, 3, track);
+        using (var th = new SolidBrush(Color.FromArgb(160, Accent))) g.FillRectangle(th, Width - 7, pos, 3, thumb);
       }
     }
   }

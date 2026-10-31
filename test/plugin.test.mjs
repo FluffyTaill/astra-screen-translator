@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 process.env.ST_NO_HELPER = "1";
 const require = createRequire(import.meta.url);
-const { app, cleanSettings, cleanGlossary, parseHotkey, DEFAULTS, Helper, similar, translate, worthTranslating, liveUpdate, speechChunks, protect, restore, wordCard, RateLimited, installCommand, OCR_PACKS, dictionary } = require("./.build/plugin.cjs");
+const { app, cleanSettings, cleanGlossary, parseHotkey, DEFAULTS, Helper, similar, translate, worthTranslating, liveUpdate, speechChunks, protect, restore, wordCard, RateLimited, installCommand, OCR_PACKS, dictionary, popupMs } = require("./.build/plugin.cjs");
 const { Harness } = require("astra-plugin-sdk/testing");
 
 const calls = [];
@@ -189,6 +189,14 @@ test("карточка слова: перевод, транскрипция, з�
   const d = { word: "bridge", from: "en", text: "мост", transcription: "brij", senses: [{ pos: "сущ.", words: ["мост", "мостик"] }, { pos: "глаг.", words: ["соединять"] }] };
   assert.deepEqual(wordCard(d), { text: "мост\nсущ. мост, мостик\nглаг. соединять", original: "bridge   [brij]" });
   assert.equal(wordCard(d, { from: "bridge", to: "Переправа" }).text.split("\n")[0], "Переправа");
+});
+
+test("окно перевода держится по длине текста: короткий — как в настройках, длинный — дольше", () => {
+  assert.equal(popupMs("Привет", 15), 15000);
+  const long = "x".repeat(1200);              // ~1200 символов ≈ 100 с чтения
+  assert.equal(popupMs(long, 15), 3000 + 100000);
+  assert.equal(popupMs(long, 0), 0, "0 — до клика");
+  assert.equal(popupMs("x".repeat(100000), 15), 600000, "не дольше 10 минут");
 });
 
 test("установка языка распознавания: только языки из списка, команда с правами администратора", () => {

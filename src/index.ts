@@ -179,15 +179,20 @@ async function say(text: string) {
 
 const badgeOf = (from: string) => (from ? `${from.split("-")[0].toUpperCase()} → ${settings.to.split("-")[0].toUpperCase()}` : "");
 
-async function deliver(rect: Rect, original: string, style: "card" | "subs", where: "below" | "bottom", ms: number, speak: boolean) {
+async function deliver(rect: Rect, original: string, style: "card" | "subs", where: "below" | "bottom", ms: number | "auto", speak: boolean) {
   const t = await translate(original, settings.to, settings.engine, settings.deeplKey, settings.glossary);
-  await helper.show(rect, t.text, { style, where, size: settings.fontSize, ms, original: settings.showOriginal ? original : "", badge: badgeOf(t.from) });
+  await helper.show(rect, t.text, { style, where, size: settings.fontSize, ms: ms === "auto" ? popupMs(t.text + (settings.showOriginal ? original : "")) : ms, original: settings.showOriginal ? original : "", badge: badgeOf(t.from) });
   if (settings.copy) await helper.fire({ op: "clip", text: t.text }).catch(() => {});
   if (speak && settings.speak) void say(t.text);
   return t;
 }
 
-const popupMs = () => settings.popupSec * 1000;
+// Сколько держать окно: не меньше «Скрывать через», а для длинного текста — сколько нужно, чтобы
+// спокойно прочитать (~12 символов в секунду плюс 3 с на то, чтобы перевести взгляд). 0 — до клика
+export function popupMs(text = "", popupSec = settings.popupSec) {
+  if (popupSec <= 0) return 0;
+  return Math.min(10 * 60_000, Math.max(popupSec * 1000, 3000 + Math.round((text.length / 12) * 1000)));
+}
 
 // Выделить область → перевести → показать рядом
 export async function translateRegion(): Promise<string> {
@@ -200,7 +205,7 @@ export async function translateRegion(): Promise<string> {
       { style: "card", where: "below", size: settings.fontSize, ms: 6000 });
     return "В выделенной области не нашлось текста.";
   }
-  const t = await deliver(p.rect, text, "card", "below", popupMs(), true);
+  const t = await deliver(p.rect, text, "card", "below", "auto", true);
   return `Оригинал: ${text}\nПеревод: ${t.text}`;
 }
 
@@ -229,7 +234,7 @@ ${(e as Error).message}`, { style: "card", where: "below", size: settings.fontSi
     throw e;
   }
   const card = wordCard(d, g);
-  await helper.show(r.rect, card.text, { style: "card", where: "below", size: settings.fontSize, ms: popupMs(), original: card.original, badge: badgeOf(d.from) });
+  await helper.show(r.rect, card.text, { style: "card", where: "below", size: settings.fontSize, ms: popupMs(card.text), original: card.original, badge: badgeOf(d.from) });
   return `${r.word}: ${card.text}`;
 }
 
@@ -280,7 +285,7 @@ export async function translateWhole(target: "screen" | "window", show: boolean)
   const text = r.text.trim();
   if (!worthTranslating(text)) return "На экране не нашлось текста для перевода.";
   // ответ получает ИИ Astra и сам его озвучит — свой голос поверх не нужен
-  const t = show ? await deliver(r.rect, text, "card", "below", popupMs(), false) : await translate(text, settings.to, settings.engine, settings.deeplKey, settings.glossary);
+  const t = show ? await deliver(r.rect, text, "card", "below", "auto", false) : await translate(text, settings.to, settings.engine, settings.deeplKey, settings.glossary);
   return `Оригинал: ${text}\nПеревод: ${t.text}`;
 }
 
